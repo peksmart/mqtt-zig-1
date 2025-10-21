@@ -5,26 +5,31 @@ const Allocator = std.mem.Allocator;
 
 pub fn SinglyLinkedList(comptime T: type) type {
     return struct {
-        list: ListType,
+        first: ?*Node = null,
         len: usize = 0,
-        pool: MemoryPool(ListType.Node),
+        pool: MemoryPool(Node),
         allocator: Allocator,
 
-        pub const ListType = std.SinglyLinkedList(T);
-        pub const CompareFn = *const fn(*T, *T) isize;
+        pub const Node = struct {
+            next: ?*Node = null,
+            data: T,
+        };
+
+        pub const CompareFn = *const fn (*T, *T) isize;
 
         const Self = @This();
 
         pub fn init(allocator: Allocator) Self {
             return .{
-                .list = .{},
-                .pool = MemoryPool(ListType.Node).init(allocator),
+                .first = null,
+                .pool = MemoryPool(Node).init(allocator),
                 .allocator = allocator,
+                .len = 0,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            var cur = self.list.first;
+            var cur = self.first;
             while (cur) |current_node| {
                 cur = current_node.next;
                 self.pool.destroy(current_node);
@@ -35,43 +40,49 @@ pub fn SinglyLinkedList(comptime T: type) type {
             self.len = 0;
         }
 
-        pub fn remove(self: *Self, node_data: T, cmp: *const fn(T, T) isize) void {
-            var it = self.list.first;
+        pub fn remove(self: *Self, node_data: T, cmp: *const fn (T, T) isize) void {
+            var prev: ?*Node = null;
+            var it = self.first;
             while (it) |n| {
                 if (cmp(n.data, node_data) == 0) {
-                    self.list.remove(n);
+                    if (prev) |p| {
+                        p.next = n.next;
+                    } else {
+                        self.first = n.next;
+                    }
                     self.pool.destroy(n);
                     self.len -= 1;
                     return;
                 }
 
+                prev = n;
                 it = n.next;
             }
         }
 
         // Push at front of list
-        pub fn push(self: *Self, data: T) !*ListType.Node {
+        pub fn push(self: *Self, data: T) !*Node {
             const node = try self.pool.create();
-            node.* = .{ .data = data };
+            node.* = .{ .data = data, .next = self.first };
 
-            self.list.prepend(node);
+            self.first = node;
 
             self.len += 1;
 
             return node;
         }
 
-        pub fn sortInstert(self: *Self, data: T, cmp_fn: CompareFn) void {
-            
+        pub fn sortInstert(self: *Self, data: T, cmp_fn: CompareFn) !void {
             const node = try self.pool.create();
-            node.* = .{ .data = data };
+            node.* = .{ .data = data, .next = null };
 
-            if (self.list.first == null or cmp_fn(self.list.first.?, node)) {
-                self.list.prepend(node);
+            if (self.first == null or cmp_fn(&self.first.?.data, &node.data) > 0) {
+                node.next = self.first;
+                self.first = node;
             } else {
-                var cur = self.list.first.?;
+                var cur = self.first.?;
 
-                while (cur.next != null and cmp_fn(cur.next.?, node) < 0) {
+                while (cur.next != null and cmp_fn(&cur.next.?.data, &node.data) < 0) {
                     cur = cur.next.?;
                 }
 
@@ -88,9 +99,9 @@ pub fn SinglyLinkedList(comptime T: type) type {
 
         //Returns a pointer to a node near the middle of the list
         pub fn bisect(self: *Self) Self {
-            var fast: ?*ListType.Node = self.list.first;
-            var slow: ?*ListType.Node = self.list.first;
-            var prev: ?*ListType.Node = null;
+            var fast: ?*Node = self.first;
+            var slow: ?*Node = self.first;
+            var prev: ?*Node = null;
 
             while (fast != null and fast.?.next != null) {
                 fast = fast.?.next.?.next;
@@ -99,13 +110,16 @@ pub fn SinglyLinkedList(comptime T: type) type {
             }
 
             var result: Self = .{
-                .list = .{ .first = slow },
-                .pool = MemoryPool(ListType.Node).init(self.allocator),
+                .first = slow,
+                .pool = MemoryPool(Node).init(self.allocator),
                 .allocator = self.allocator,
+                .len = 0,
             };
 
             if (prev != null) {
                 prev.?.next = null;
+            } else {
+                self.first = null;
             }
 
             result.recalculateLen();
@@ -115,7 +129,7 @@ pub fn SinglyLinkedList(comptime T: type) type {
         }
 
         fn recalculateLen(self: *Self) void {
-            var cur = self.list.first;
+            var cur = self.first;
             var len: usize = 0;
 
             while (cur) |current_node| {
@@ -132,15 +146,14 @@ test "Push" {
     var l = SinglyLinkedList(usize).init(std.testing.allocator);
     defer l.deinit();
 
-    const data = [_]usize{5, 15, 25, 35, 45, 55, 65};
+    const data = [_]usize{ 5, 15, 25, 35, 45, 55, 65 };
     for (data) |d| {
         _ = try l.push(d);
     }
 
-    var cur = l.list.first;
+    var cur = l.first;
     var i = data.len - 1;
     while (cur) |current| {
-
         try std.testing.expectEqual(data[i], current.data);
 
         cur = current.next;
@@ -156,7 +169,7 @@ test "Bisect" {
     var l = SinglyLinkedList(usize).init(std.testing.allocator);
     defer l.deinit();
 
-    var data = [_]usize{5, 15, 25, 35, 45, 55, 65};
+    var data = [_]usize{ 5, 15, 25, 35, 45, 55, 65 };
     for (data) |d| {
         _ = try l.push(d);
     }
@@ -169,19 +182,17 @@ test "Bisect" {
     try std.testing.expectEqual(l.len, 3);
     try std.testing.expectEqual(bisected.len, 4);
 
-    var cur = l.list.first;
+    var cur = l.first;
     var i: usize = 0;
     while (cur) |current| {
-
         try std.testing.expectEqual(data[i], current.data);
 
         cur = current.next;
         i += 1;
     }
 
-    cur = bisected.list.first;
+    cur = bisected.first;
     while (cur) |current| {
-
         try std.testing.expectEqual(data[i], current.data);
 
         cur = current.next;

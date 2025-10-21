@@ -15,7 +15,7 @@ const Node = struct {
             return;
         }
 
-        var cur = self.children.list.first;
+        var cur = self.children.first;
         while (cur) |current_node| {
             current_node.data.deinit(pool);
             cur = current_node.next;
@@ -53,10 +53,10 @@ pub fn deinit(self: *Self) void {
     self.allocator.destroy(self);
 }
 
-fn linearSearch(list: *const List, value: u8) ?*List.ListType.Node {
+fn linearSearch(list: *const List, value: u8) ?*List.Node {
     if (list.len == 0) return null;
 
-    var cur = list.list.first;
+    var cur = list.first;
     while (cur) |current_node| {
         if (current_node.data.chr == value) {
             return current_node;
@@ -99,7 +99,6 @@ pub fn find(node: *const Node, prefix: []const u8) ?*Node {
 }
 
 pub fn prefixDelete(self: *Self, prefix: []const u8) void {
-
     var cursor = find(self.root, prefix);
     if (cursor == null) return;
 
@@ -108,7 +107,7 @@ pub fn prefixDelete(self: *Self, prefix: []const u8) void {
         return;
     }
 
-    var cur = cursor.?.children.list.first;
+    var cur = cursor.?.children.first;
     while (cur) |c| {
         cur = c.next;
         self.deinitNode(c.data);
@@ -119,8 +118,7 @@ pub fn prefixDelete(self: *Self, prefix: []const u8) void {
 }
 
 pub fn deinitNode(self: *Self, node: *Node) void {
-
-    var cur = node.children.list.first;
+    var cur = node.children.first;
     while (cur) |n| {
         self.deinitNode(n.data);
         cur = n.next;
@@ -145,7 +143,6 @@ pub fn delete(self: *Self, key: []const u8) bool {
 }
 
 pub fn recursiveDelete(pool: *MemoryPool(Node), node: ?*Node, key: []const u8, size: *usize, found: *bool) bool {
-
     if (node == null) return false;
 
     if (key.len == 0) {
@@ -170,14 +167,12 @@ pub fn recursiveDelete(pool: *MemoryPool(Node), node: ?*Node, key: []const u8, s
             return node.?.children.len == 0;
         }
     } else {
-
         const cur = linearSearch(&node.?.children, key[0]);
         if (cur == null) return false;
 
         var child = cur.?.data;
         if (recursiveDelete(pool, child, key[1..], size, found)) {
-
-            var n_rem = Node{.chr = key[0]};
+            var n_rem = Node{ .chr = key[0] };
             node.?.children.remove(&n_rem, withChar);
 
             child.deinit(pool);
@@ -192,7 +187,7 @@ pub fn recursiveDelete(pool: *MemoryPool(Node), node: ?*Node, key: []const u8, s
 pub fn insert(self: *Self, key: []const u8, data: *Topic) !void {
     var cursor = self.root;
     var cur_node: ?*Node = null;
-    var tmp_node: ?*List.ListType.Node = null;
+    var tmp_node: ?*List.Node = null;
 
     for (key) |chr| {
         tmp_node = linearSearch(&cursor.children, chr);
@@ -262,7 +257,7 @@ pub fn print(self: *const Self, writer: anytype) !void {
     // try writer.print("{c} (root)\n", .{self.root.chr}); // Assuming root is ' ' or similar
 
     // Iterate through the direct children of the root
-    var cur = self.root.children.list.first;
+    var cur = self.root.children.first;
     while (cur) |list_node| {
         const child = list_node.data;
         const next_sibling = list_node.next;
@@ -306,7 +301,7 @@ fn printNodeRecursive(
     const child_prefix = child_prefix_fbs.getWritten();
 
     // Iterate through children and recurse
-    var cur = node.children.list.first;
+    var cur = node.children.first;
     while (cur) |list_node| {
         const child = list_node.data;
         const next_sibling = list_node.next;
@@ -320,7 +315,7 @@ fn mergeSort(list: *List) void {
     if (list.len <= 1) return;
 
     var right_half = list.bisect();
-    defer right_half.list = .{};
+    defer right_half.deinit();
 
     mergeSort(list);
     mergeSort(&right_half);
@@ -329,20 +324,20 @@ fn mergeSort(list: *List) void {
 }
 
 fn merge(list: *List, other: *List) void {
-    if (other.list.first == null) return;
+    if (other.first == null) return;
 
-    if (list.list.first == null) {
-        list.list = other.list;
+    if (list.first == null) {
+        list.first = other.first;
         list.len = other.len;
-        other.list = .{};
+        other.first = null;
         other.len = 0;
         return;
     }
 
-    var left_ptr = list.list.first;
-    var right_ptr = other.list.first;
-    var new_head: ?*List.ListType.Node = null;
-    var tail: ?*List.ListType.Node = null;
+    var left_ptr = list.first;
+    var right_ptr = other.first;
+    var new_head: ?*List.Node = null;
+    var tail: ?*List.Node = null;
 
     if (left_ptr.?.data.chr <= right_ptr.?.data.chr) {
         new_head = left_ptr;
@@ -372,10 +367,10 @@ fn merge(list: *List, other: *List) void {
         tail.?.next = right_ptr;
     }
 
-    list.list.first = new_head;
+    list.first = new_head;
     list.len += other.len;
 
-    other.list = .{};
+    other.first = null;
     other.len = 0;
 }
 
@@ -391,7 +386,7 @@ test "Merge sort" {
 
     mergeSort(&list);
 
-    var it = list.list.first;
+    var it = list.first;
     var i: usize = 0;
     while (it) |node| {
         try std.testing.expectEqual(values_ordered[i], node.data.chr);

@@ -44,7 +44,7 @@ pub fn decodeLength(reader: AnyReader) !usize {
     return value;
 }
 
-pub fn decodeLengthSize(reader: AnyReader) !struct {usize, usize} {
+pub fn decodeLengthSize(reader: AnyReader) !struct { usize, usize } {
     var c: u8 = 128;
     var multiplier: usize = 1;
     var value: usize = 0;
@@ -57,7 +57,7 @@ pub fn decodeLengthSize(reader: AnyReader) !struct {usize, usize} {
         multiplier *= 128;
     }
 
-    return .{value, bytes_read};
+    return .{ value, bytes_read };
 }
 
 // DECODER FUNCTIONS
@@ -161,12 +161,12 @@ pub fn readMQTTPublish(allocator: Allocator, header: messages.MQTTHeader, reader
 
     _ = try reader.read(publish.payload[0..message_len]);
 
-    return .{ .Publish = publish};
+    return .{ .Publish = publish };
 }
 
 pub fn readMQTTSubscribe(allocator: Allocator, header: messages.MQTTHeader, reader: AnyReader) !messages.MQTTMessage {
     var subscribe = messages.MQTTSubscribe{
-        .tuples = std.ArrayList(messages.SubscribeTuple).init(allocator),
+        .tuples = .{},
     };
 
     // Read header
@@ -189,18 +189,18 @@ pub fn readMQTTSubscribe(allocator: Allocator, header: messages.MQTTHeader, read
         tuple.topic_len = @intCast(tuple.topic.len);
 
         message_len -= tuple.topic_len;
-        try subscribe.tuples.append(tuple);
+        try subscribe.tuples.append(allocator, tuple);
         message_len -= 1;
     }
 
     subscribe.tuples_len = @intCast(i);
 
-    return .{ .Subscribe = subscribe};
+    return .{ .Subscribe = subscribe };
 }
 
 pub fn readMQTTUnsubscribe(allocator: Allocator, header: messages.MQTTHeader, reader: AnyReader) !messages.MQTTMessage {
     var unsubscribe = messages.MQTTUnsubscribe{
-        .tuples = std.ArrayList(messages.UnsubscribeTuple).init(allocator),
+        .tuples = .{},
     };
 
     // Read header
@@ -219,15 +219,15 @@ pub fn readMQTTUnsubscribe(allocator: Allocator, header: messages.MQTTHeader, re
             .topic = try decodeString(allocator, reader),
         };
 
-        tuple.topic_len = @intCast(tuple.topic.len);
+        tuple.topic_len = @intCast(tuple.topic_len);
 
         message_len -= tuple.topic_len;
-        try unsubscribe.tuples.append(tuple);
+        try unsubscribe.tuples.append(allocator, tuple);
     }
 
     unsubscribe.tuples_len = @intCast(i);
 
-    return .{ .Unsubscribe = unsubscribe};
+    return .{ .Unsubscribe = unsubscribe };
 }
 
 pub fn readMQTTAck(_: Allocator, header: messages.MQTTHeader, reader: AnyReader) !messages.MQTTMessage {
@@ -250,17 +250,13 @@ pub fn readMQTTPacket(allocator: Allocator, reader: AnyReader) !messages.MQTTMes
     std.debug.print("Header is: {any}\n", .{mqtt_header});
 
     switch (@as(PacketType, @enumFromInt(mqtt_header.type))) {
-        PacketType.DISCONNECT => return .{ .Disconnect = messages.MQTTAck{.header = mqtt_header} },
-        PacketType.PINGREQ,
-        PacketType.PINGRESP => return .{ .Header = mqtt_header },
+        PacketType.DISCONNECT => return .{ .Disconnect = messages.MQTTAck{ .header = mqtt_header } },
+        PacketType.PINGREQ, PacketType.PINGRESP => return .{ .Header = mqtt_header },
 
         PacketType.CONNECT => return readMQTTConnect(allocator, mqtt_header, reader),
         PacketType.PUBLISH => return readMQTTPublish(allocator, mqtt_header, reader),
 
-        PacketType.PUBACK,
-        PacketType.PUBREC,
-        PacketType.PUBREL,
-        PacketType.PUBCOMP => return readMQTTAck(allocator, mqtt_header, reader),
+        PacketType.PUBACK, PacketType.PUBREC, PacketType.PUBREL, PacketType.PUBCOMP => return readMQTTAck(allocator, mqtt_header, reader),
 
         PacketType.SUBSCRIBE => return readMQTTSubscribe(allocator, mqtt_header, reader),
         PacketType.UNSUBSCRIBE => return readMQTTUnsubscribe(allocator, mqtt_header, reader),
@@ -338,7 +334,6 @@ pub fn writeMQTTPublish(writer: AnyWriter, message: messages.MQTTPublish) !usize
         written += 2;
     }
 
-
     written += try writer.write(message.payload);
 
     return written + 3;
@@ -356,10 +351,7 @@ pub fn writeMQTTMessage(writer: AnyWriter, message: messages.MQTTMessage, msg_ty
         PacketType.CONNACK => writeMQTTConnack(writer, message.Connack),
         PacketType.PUBLISH => writeMQTTPublish(writer, message.Publish),
 
-        PacketType.PUBACK,
-        PacketType.PUBREC,
-        PacketType.PUBREL,
-        PacketType.PUBCOMP => writeMQTTAck(writer, message.Ack),
+        PacketType.PUBACK, PacketType.PUBREC, PacketType.PUBREL, PacketType.PUBCOMP => writeMQTTAck(writer, message.Ack),
 
         PacketType.SUBACK => writeMQTTSuback(writer, message.Suback),
         PacketType.UNSUBACK => writeMQTTAck(writer, message.Ack),
@@ -370,24 +362,23 @@ pub fn writeMQTTMessage(writer: AnyWriter, message: messages.MQTTMessage, msg_ty
     };
 }
 
-
 test "Encode len" {
     var buf: [4]u8 = undefined;
     @memset(&buf, 0);
     var stream = std.io.fixedBufferStream(&buf);
 
-    _ = try encodeLength(stream.writer().any(), 128*128);
+    _ = try encodeLength(stream.writer().any(), 128 * 128);
 
-    const expected: [4]u8 = .{0x80, 0x80, 0x01, 0x00};
+    const expected: [4]u8 = .{ 0x80, 0x80, 0x01, 0x00 };
     try std.testing.expectEqual(expected, buf);
 }
 
 test "Decode len" {
-    var input: [4]u8 = .{0x80, 0x80, 0x01, 0x00};
+    var input: [4]u8 = .{ 0x80, 0x80, 0x01, 0x00 };
     var stream = std.io.fixedBufferStream(&input);
 
     const got = try decodeLength(stream.reader().any());
-    try std.testing.expectEqual(128*128, got);
+    try std.testing.expectEqual(128 * 128, got);
 }
 
 test "Decode connect flags" {
@@ -409,7 +400,7 @@ test "Decode connect flags" {
 }
 
 test "Decode connect" {
-    var input = [_]u8{0x10, 0x10, 0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3C, 0x00, 0x04, 0x44, 0x49, 0x47, 0x49};
+    var input = [_]u8{ 0x10, 0x10, 0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3C, 0x00, 0x04, 0x44, 0x49, 0x47, 0x49 };
     var stream = std.io.fixedBufferStream(&input);
 
     const got = try readMQTTPacket(std.testing.allocator, stream.reader().any());

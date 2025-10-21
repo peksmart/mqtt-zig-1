@@ -8,6 +8,7 @@ const MQTTClient = @import("mqtt.zig").MQTTClient;
 const config = @import("config.zig");
 const MemoryPool = std.heap.MemoryPoolExtra;
 const TopicName = @import("mqtt.zig").TopicName;
+const fifo = @import("fifo.zig");
 
 const log = std.log.scoped(.Server);
 
@@ -15,12 +16,12 @@ const posix = std.posix;
 const net = std.net;
 const Thread = std.Thread;
 
-const Queue = std.fifo.LinearFifo(std.posix.socket_t, .{ .Static = config.queue_size});
+const Queue = fifo.LinearFifo(std.posix.socket_t, .{ .Static = config.queue_size });
 
-const ClientPool = MemoryPool(Client, .{.growable = false});
-const MQTTClientPool = MemoryPool(MQTTClient, .{.growable = false});
-const MessageAllocatorPool = MemoryPool([config.maximum_message_size]u8, .{.growable = false});
-const TopicNamePool = MemoryPool(TopicName, .{.growable = false});
+const ClientPool = MemoryPool(Client, .{ .growable = false });
+const MQTTClientPool = MemoryPool(MQTTClient, .{ .growable = false });
+const MessageAllocatorPool = MemoryPool([config.maximum_message_size]u8, .{ .growable = false });
+const TopicNamePool = MemoryPool(TopicName, .{ .growable = false });
 
 const Acceptor = struct {
     accepting: bool,
@@ -49,22 +50,7 @@ pub const Client = struct {
 
 var running = std.atomic.Value(bool).init(true);
 
-const SYSTEM_TOPICS = [_][]const u8{
-    "$SYS/",
-    "$SYS/broker/",
-    "$SYS/broker/clients/",
-    "$SYS/broker/bytes/",
-    "$SYS/broker/messages/",
-    "$SYS/broker/uptime/",
-    "$SYS/broker/uptime/sol",
-    "$SYS/broker/clients/connected/",
-    "$SYS/broker/clients/disconnected/",
-    "$SYS/broker/bytes/sent/",
-    "$SYS/broker/bytes/received/",
-    "$SYS/broker/messages/sent/",
-    "$SYS/broker/messages/received/",
-    "$SYS/broker/memory/used"
-};
+const SYSTEM_TOPICS = [_][]const u8{ "$SYS/", "$SYS/broker/", "$SYS/broker/clients/", "$SYS/broker/bytes/", "$SYS/broker/messages/", "$SYS/broker/uptime/", "$SYS/broker/uptime/sol", "$SYS/broker/clients/connected/", "$SYS/broker/clients/disconnected/", "$SYS/broker/bytes/sent/", "$SYS/broker/bytes/received/", "$SYS/broker/messages/sent/", "$SYS/broker/messages/received/", "$SYS/broker/memory/used" };
 
 pub const Server = struct {
     io: *IO,
@@ -152,14 +138,14 @@ pub const Server = struct {
         try std.posix.bind(self.socket, &self.address.any, self.address.getOsSockLen());
         try std.posix.listen(self.socket, config.kernel_backlog);
 
-        std.log.info("server listening on IP {}. CTRL+C to shutdown.", .{self.address});
+        std.log.info("server listening on IP {any}. CTRL+C to shutdown.", .{self.address});
 
         var queue_mutex = Thread.Mutex{};
         var queue = Queue.init();
 
         var handles: [num_handles]Thread = undefined;
         defer for (handles) |h| h.join();
-        for (&handles) |*h| h.* = try Thread.spawn(.{}, logError, .{&queue_mutex, &queue, self});
+        for (&handles) |*h| h.* = try Thread.spawn(.{}, logError, .{ &queue_mutex, &queue, self });
 
         var acceptor = Acceptor{
             .accepting = true,
@@ -241,7 +227,7 @@ fn recvHeaderAndLenCallback(client_ptr: *Client, completion: *IO.Completion, res
         break :blk 0;
     };
 
-    log.debug("{}: Received {} bytes from {}", .{client_ptr.thread_id, received, client_ptr.socket});
+    log.debug("{}: Received {} bytes from {}", .{ client_ptr.thread_id, received, client_ptr.socket });
 
     if (received <= 0) {
         log.err("Received empty. Closing client: {}", .{client_ptr.socket});
@@ -259,13 +245,13 @@ fn recvHeaderAndLenCallback(client_ptr: *Client, completion: *IO.Completion, res
     const payload_len = message_len.@"0";
     const len_bytes_size = message_len.@"1";
 
-    log.debug("Message length: {} - Read bytes: {}", .{payload_len, len_bytes_size});
+    log.debug("Message length: {} - Read bytes: {}", .{ payload_len, len_bytes_size });
 
     if (payload_len == 0) {
         // TODO: Nothing more to read, handle command/message directly
     }
 
-    client_ptr.io.recv(*Client, client_ptr, recvPayloadCallback, &client_ptr.recv_completion, client_ptr.socket, client_ptr.client_buffer[received..payload_len + len_bytes_size + 1]);
+    client_ptr.io.recv(*Client, client_ptr, recvPayloadCallback, &client_ptr.recv_completion, client_ptr.socket, client_ptr.client_buffer[received .. payload_len + len_bytes_size + 1]);
 }
 
 fn recvPayloadCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.RecvError!usize) void {
@@ -274,7 +260,7 @@ fn recvPayloadCallback(client_ptr: *Client, completion: *IO.Completion, result: 
         break :blk 0;
     };
 
-    log.debug("{}: Received payload {} bytes from {}", .{client_ptr.thread_id, received, client_ptr.socket});
+    log.debug("{}: Received payload {} bytes from {}", .{ client_ptr.thread_id, received, client_ptr.socket });
 
     if (received <= 0) {
         log.err("Received empty. Closing client: {}", .{client_ptr.socket});
@@ -302,7 +288,7 @@ fn recvPayloadCallback(client_ptr: *Client, completion: *IO.Completion, result: 
         return;
     };
 
-    log.info("Received message {}", .{received_msg});
+    log.info("Received message {any}", .{received_msg});
 
     const send_buffer = handleMessage(client_ptr, received_msg) catch |err| {
         log.err("Error handling message: {s}", .{@errorName(err)});
@@ -338,7 +324,7 @@ fn handleMessage(client_ptr: *Client, received_msg: Messages.MQTTMessage) Handle
 fn sendCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.SendError!usize) void {
     _ = completion;
     const sent = result catch @panic("sendCallback");
-    std.log.debug("{}: Sent {} to {}", .{client_ptr.thread_id, sent, client_ptr.socket});
+    std.log.debug("{}: Sent {} to {}", .{ client_ptr.thread_id, sent, client_ptr.socket });
 
     // Cleanup recv buffer and recv new message
     @memset(client_ptr.client_buffer[0..], 0);
@@ -348,7 +334,7 @@ fn sendCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.Send
 fn sendPublishCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.SendError!usize) void {
     _ = completion;
     const sent = result catch @panic("sendCallback");
-    std.log.debug("{}: Sent {} to {}", .{client_ptr.thread_id, sent, client_ptr.socket});
+    std.log.debug("{}: Sent {} to {}", .{ client_ptr.thread_id, sent, client_ptr.socket });
 }
 
 fn closeCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.CloseError!void) void {
@@ -385,8 +371,8 @@ pub fn subscribeHandler(client: *Client, message: *const Messages.MQTTSubscribe)
     if (client.core_client) |core_client| {
         var wildcard = false;
 
-        var rcs = std.ArrayList(u8).init(client.arena.allocator());
-        defer rcs.deinit();
+        var rcs: std.ArrayList(u8) = .{};
+        defer rcs.deinit(client.arena.allocator());
 
         for (message.tuples.items) |subscribe| {
             std.log.info("Received SUBSCRIBE from {s}", .{core_client.client_id});
@@ -398,7 +384,7 @@ pub fn subscribeHandler(client: *Client, message: *const Messages.MQTTSubscribe)
             defer client.server.topic_name_pool.destroy(topic_name_buffer);
 
             if (std.mem.endsWith(u8, topic, "/#")) {
-                @memcpy(topic_name_buffer.name[0..topic.len - 1], topic[0..topic.len - 1]);
+                @memcpy(topic_name_buffer.name[0 .. topic.len - 1], topic[0 .. topic.len - 1]);
                 topic_name_buffer.length = topic.len - 1;
                 wildcard = true;
             } else if (topic[topic.len - 1] != '/') {
@@ -419,7 +405,7 @@ pub fn subscribeHandler(client: *Client, message: *const Messages.MQTTSubscribe)
 
             try t.addSubscriber(core_client, subscribe.qos, true);
 
-            try rcs.append(subscribe.qos);
+            try rcs.append(client.arena.allocator(), subscribe.qos);
         }
 
         const response = Messages.MQTTMessage{
@@ -428,7 +414,7 @@ pub fn subscribeHandler(client: *Client, message: *const Messages.MQTTSubscribe)
 
         var writeStream = std.io.fixedBufferStream(client.client_buffer[0..]);
 
-        std.debug.print("RESPONSE: \n {}\n", .{response});
+        std.debug.print("RESPONSE: \n {any}\n", .{response});
 
         return MessageSerde.writeMQTTMessage(writeStream.writer().any(), response, @intFromEnum(Messages.PacketType.SUBACK));
     }
@@ -446,7 +432,7 @@ pub fn unsubscribeHandler(client: *Client, message: *const Messages.MQTTUnsubscr
 
         var writeStream = std.io.fixedBufferStream(client.client_buffer[0..]);
 
-        std.debug.print("RESPONSE: \n {}\n", .{response});
+        std.debug.print("RESPONSE: \n {any}\n", .{response});
 
         return MessageSerde.writeMQTTMessage(writeStream.writer().any(), response, @intFromEnum(Messages.PacketType.UNSUBACK));
     }
@@ -469,7 +455,7 @@ pub fn publishHandler(client: *Client, message: *Messages.MQTTPublish) HandlerEr
         defer server.topic_name_pool.destroy(topic_name_buffer);
 
         if (std.mem.endsWith(u8, topic, "/#")) {
-            @memcpy(topic_name_buffer.name[0..topic.len - 1], topic[0..topic.len - 1]);
+            @memcpy(topic_name_buffer.name[0 .. topic.len - 1], topic[0 .. topic.len - 1]);
             topic_name_buffer.length = topic.len - 1;
         } else if (topic[topic.len - 1] != '/') {
             @memset(topic_name_buffer.name[0..], 0);
@@ -492,7 +478,7 @@ pub fn publishHandler(client: *Client, message: *Messages.MQTTPublish) HandlerEr
             const sub = t.subscribers[idx];
 
             message.header.qos = @intCast(sub.qos);
-            if (message.header.qos > @intFromEnum( Messages.QosLevel.AT_MOST_ONCE)) {
+            if (message.header.qos > @intFromEnum(Messages.QosLevel.AT_MOST_ONCE)) {
                 publen += 2;
             }
 
@@ -515,9 +501,9 @@ pub fn publishHandler(client: *Client, message: *Messages.MQTTPublish) HandlerEr
 
             var writeStream = std.io.fixedBufferStream(server_client.client_buffer[0..]);
 
-            std.debug.print("RESPONSE: \n {}\n", .{pub_message});
+            std.debug.print("RESPONSE: \n {any}\n", .{pub_message});
 
-            const written =try MessageSerde.writeMQTTMessage(writeStream.writer().any(), pub_message, @intFromEnum(Messages.PacketType.PUBLISH));
+            const written = try MessageSerde.writeMQTTMessage(writeStream.writer().any(), pub_message, @intFromEnum(Messages.PacketType.PUBLISH));
             std.debug.assert(written == publen);
 
             server_client.io.send(*Client, server_client, sendPublishCallback, &server_client.pub_completion, server_client.socket, server_client.client_buffer[0..publen]);
@@ -525,7 +511,7 @@ pub fn publishHandler(client: *Client, message: *Messages.MQTTPublish) HandlerEr
             server.info.messages_sent += 1;
             server.info.bytes_sent += publen;
         }
-        
+
         std.log.info("QOS LEVEL: {s}", .{@tagName(@as(Messages.QosLevel, @enumFromInt(qos)))});
 
         switch (qos) {
@@ -566,7 +552,7 @@ pub fn pingHandler(client: *Client, _: *const Messages.MQTTPingreq) HandlerError
 
         var writeStream = std.io.fixedBufferStream(client.client_buffer[0..]);
 
-        std.debug.print("RESPONSE: \n {}\n", .{response});
+        std.debug.print("RESPONSE: \n {any}\n", .{response});
 
         return MessageSerde.writeMQTTMessage(writeStream.writer().any(), response, @intFromEnum(Messages.PacketType.PINGRESP));
     }
@@ -590,11 +576,9 @@ pub fn disconnectHandler(client: *Client, _: *const Messages.MQTTAck) HandlerErr
 }
 
 pub fn connectHandler(client: *Client, message: *const Messages.MQTTConnect) HandlerError!usize {
-
     var server = client.server;
 
     if (server.mqtt.containsClient(message.payload.client_id) and std.mem.eql(u8, message.payload.client_id, &client.core_client.?.client_id)) {
-
         std.log.info("Received double CONNECT from {s}, disconnecting client", .{message.payload.client_id});
 
         _ = server.mqtt.removeClient(client.core_client.?);
@@ -631,7 +615,7 @@ pub fn connectHandler(client: *Client, message: *const Messages.MQTTConnect) Han
 
     var writeStream = std.io.fixedBufferStream(client.client_buffer[0..]);
 
-    std.debug.print("RESPONSE: \n {}\n", .{response});
+    std.debug.print("RESPONSE: \n {any}\n", .{response});
 
     return MessageSerde.writeMQTTMessage(writeStream.writer().any(), response, @intFromEnum(Messages.PacketType.CONNACK));
 }
