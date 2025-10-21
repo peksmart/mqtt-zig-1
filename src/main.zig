@@ -17,11 +17,11 @@ pub fn main() !void {
         .topic_len = 11,
         .payload_len = 13,
     });
-    
+
     try store.getMessage("TESTID", 1234);
 
     var core = try Core.init(std.heap.page_allocator);
-    var s = try Server.new(std.heap.page_allocator, "127.0.0.1", 8080, &core);
+    var s = try Server.new(std.heap.page_allocator, "127.0.0.1", 1883, &core);
     defer s.deinit();
 
     try s.start(1);
