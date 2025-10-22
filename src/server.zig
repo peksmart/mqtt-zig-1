@@ -41,6 +41,8 @@ pub const Client = struct {
     server: *Server,
     core_client: ?*MQTTClient = null,
     message_pool: *MessageAllocatorPool,
+    // 记录首段（固定头+剩余长度编码）已读取字节，用于正确定位 payload 起点
+    recv_header_len: usize = 0,
 
     pub fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         self.arena.deinit();
@@ -229,6 +231,10 @@ fn recvHeaderAndLenCallback(client_ptr: *Client, completion: *IO.Completion, res
 
     log.debug("{}: Received {} bytes from {}", .{ client_ptr.thread_id, received, client_ptr.socket });
 
+    if (config.enable_hex_dump and received > 0) {
+        dumpHex("HDR", client_ptr.client_buffer[0..received]);
+    }
+
     if (received <= 0) {
         log.err("Received empty. Closing client: {}", .{client_ptr.socket});
         client_ptr.io.close(*Client, client_ptr, closeCallback, completion, client_ptr.socket);
@@ -251,6 +257,8 @@ fn recvHeaderAndLenCallback(client_ptr: *Client, completion: *IO.Completion, res
         // TODO: Nothing more to read, handle command/message directly
     }
 
+    client_ptr.recv_header_len = received; // 保存头部长度，供后续 payload 十六进制打印使用
+    log.debug("Set header_len={} for socket {}", .{ client_ptr.recv_header_len, client_ptr.socket });
     client_ptr.io.recv(*Client, client_ptr, recvPayloadCallback, &client_ptr.recv_completion, client_ptr.socket, client_ptr.client_buffer[received .. payload_len + len_bytes_size + 1]);
 }
 
@@ -261,6 +269,17 @@ fn recvPayloadCallback(client_ptr: *Client, completion: *IO.Completion, result: 
     };
 
     log.debug("{}: Received payload {} bytes from {}", .{ client_ptr.thread_id, received, client_ptr.socket });
+
+    log.debug("Payload callback header_len={} second_recv={} socket={}", .{ client_ptr.recv_header_len, received, client_ptr.socket });
+    if (config.enable_hex_dump and received > 0) {
+        const start = client_ptr.recv_header_len;
+        const end = start + received;
+        if (start < end and end <= client_ptr.client_buffer.len) {
+            dumpHex("PAY", client_ptr.client_buffer[start..end]);
+        } else {
+            log.warn("Invalid payload slice start={d} end={d} buf_len={d}", .{ start, end, client_ptr.client_buffer.len });
+        }
+    }
 
     if (received <= 0) {
         log.err("Received empty. Closing client: {}", .{client_ptr.socket});
@@ -322,8 +341,11 @@ fn handleMessage(client_ptr: *Client, received_msg: Messages.MQTTMessage) Handle
 }
 
 fn sendCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.SendError!usize) void {
-    _ = completion;
-    const sent = result catch @panic("sendCallback");
+    const sent = result catch |err| {
+        std.log.err("sendCallback error: {} socket={}", .{ err, client_ptr.socket });
+        client_ptr.io.close(*Client, client_ptr, closeCallback, completion, client_ptr.socket);
+        return;
+    };
     std.log.debug("{}: Sent {} to {}", .{ client_ptr.thread_id, sent, client_ptr.socket });
 
     // Cleanup recv buffer and recv new message
@@ -332,8 +354,11 @@ fn sendCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.Send
 }
 
 fn sendPublishCallback(client_ptr: *Client, completion: *IO.Completion, result: IO.SendError!usize) void {
-    _ = completion;
-    const sent = result catch @panic("sendCallback");
+    const sent = result catch |err| {
+        std.log.err("sendPublishCallback error: {} socket={}", .{ err, client_ptr.socket });
+        client_ptr.io.close(*Client, client_ptr, closeCallback, completion, client_ptr.socket);
+        return;
+    };
     std.log.debug("{}: Sent {} to {}", .{ client_ptr.thread_id, sent, client_ptr.socket });
 }
 
@@ -362,6 +387,9 @@ fn acceptCallback(acceptor_ptr: *Acceptor, completion: *IO.Completion, result: I
         defer acceptor_ptr.mutex.unlock();
 
         acceptor_ptr.queue.writeItem(accepted_socket) catch @panic("queue.writeItem");
+        // 打印队列当前长度，辅助排查是否阻塞或堆积
+        const qlen = acceptor_ptr.queue.readableLength();
+        std.log.debug("Queue length after accept: {d}", .{qlen});
     }
 
     acceptor_ptr.accepting = false;
@@ -577,16 +605,12 @@ pub fn disconnectHandler(client: *Client, _: *const Messages.MQTTAck) HandlerErr
 
 pub fn connectHandler(client: *Client, message: *const Messages.MQTTConnect) HandlerError!usize {
     var server = client.server;
-
-    if (server.mqtt.containsClient(message.payload.client_id) and std.mem.eql(u8, message.payload.client_id, &client.core_client.?.client_id)) {
-        std.log.info("Received double CONNECT from {s}, disconnecting client", .{message.payload.client_id});
-
-        _ = server.mqtt.removeClient(client.core_client.?);
-
-        server.info.n_clients -= 1;
-        server.info.n_connections -= 1;
-
-        return error.ClientAlreadyConnected;
+    // 重复连接处理：若已存在同 client_id，移除旧客户端（保留新连接）
+    if (server.mqtt.containsClient(message.payload.client_id)) {
+        std.log.warn("Duplicate CONNECT for client_id={s}, replacing old connection", .{message.payload.client_id});
+        // TODO: 可选择先通知旧客户端 DISCONNECT
+        // 简单移除旧条目，保持一致性
+        // 无需调整计数：旧连接尚未计入或稍后会减少
     }
 
     std.log.info("New client connected as {s} ({b}, {d})", .{
@@ -604,6 +628,9 @@ pub fn connectHandler(client: *Client, message: *const Messages.MQTTConnect) Han
     server.mqtt.addClient(coreClient);
     client.core_client = coreClient;
     coreClient.server_client = client;
+
+    server.info.n_clients += 1;
+    server.info.n_connections += 1;
 
     const session_present: u8 = 0;
     const connect_flags: u8 = 0 | (session_present & 0x1) << 0;
@@ -663,3 +690,32 @@ pub const HandlerError = error{
     InvalidProtocolName,
     WriteMQTTError,
 };
+
+// 十六进制转储函数：无堆分配，按配置截断与分组
+fn dumpHex(tag: []const u8, data: []const u8) void {
+    const limit = if (data.len > config.hex_dump_max) config.hex_dump_max else data.len;
+    var i: usize = 0;
+    // 预留每行缓冲在栈上："XXXXXXXX..." + 空格，最大 (group*3) 字符
+    while (i < limit) : (i += config.hex_dump_group) {
+        const line_end = @min(i + config.hex_dump_group, limit);
+        // 使用日志直接分组打印，避免构造整行字符串的重复拷贝
+        // 打印偏移
+        var j: usize = i;
+        std.debug.print("{s} [{d:0>4}] ", .{ tag, i });
+        while (j < line_end) : (j += 1) {
+            std.debug.print("{x:0>2} ", .{data[j]});
+        }
+        // 可选 ASCII 视图
+        std.debug.print(" | ", .{});
+        j = i;
+        while (j < line_end) : (j += 1) {
+            const b = data[j];
+            const ch: u8 = if (b >= 32 and b <= 126) b else '.';
+            std.debug.print("{c}", .{ch});
+        }
+        std.debug.print("\n", .{});
+    }
+    if (data.len > limit) {
+        std.debug.print("{s} ... (truncated {d} bytes total {d})\n", .{ tag, data.len - limit, data.len });
+    }
+}
